@@ -1,12 +1,16 @@
 # GAN loop
 import csv
+import math
+
 from Generator import Generator
 from Discriminator import Discriminator
 import numpy as np
 import random
 from pcaputilities import extractSequences
+from keras.utils import plot_model
 import sys
 import glob
+import tensorflow as tf
 
 from pcaputilities import convert_to_ps_durations, convertToFeatures
 
@@ -39,9 +43,13 @@ real_durations = extractSequences(real_durations_file)
 
 max_packet_size = 5000
 total_actions = (max_packet_size * 2) + 1
+segment_length=200
 
 gen_features = []
 real_features = []
+
+for real_packet in real_packets:
+    segment_length = min(len(real_packet), segment_length)
 
 for i in range(len(real_packets)):
     durations = [float(x) for x in real_durations[i]]
@@ -50,24 +58,32 @@ for i in range(len(real_packets)):
     std_d = np.std(durations)
     gen_sample = []
     real_sample = []
-    for j in range(len(real_packets[i])):
+    for j in range(segment_length):
         packet_size_rand = random.randint(1, total_actions - 1)
-        duration_rand = np.random.normal(mean_d, std_d)
-        gen_sample.append([packet_size_rand, duration_rand if duration_rand > 0 else -1 * duration_rand])
+        duration_rand = math.fabs(np.random.normal(mean_d, std_d))
+        gen_sample.append([packet_size_rand, duration_rand])
+    for j in range(len(real_packets[i])):
         real_sample.append([packet_sizes[j], durations[j]])
     gen_features.append(gen_sample)
     real_features.append(real_sample)
 
 # Pretraining
-discriminator = Discriminator(gen_features, real_features)
+discriminator = Discriminator(gen_features, real_features, segment_length)
 # discriminator.load_models()
 discriminator.train()
 
-generator = Generator(discriminator)
+generator = Generator(discriminator, segment_length)
 generator.train()
 
+plot_model(discriminator.lstm_discriminator_network, to_file='lstm_discriminator.png', show_shapes=True, show_layer_names=True)
+plot_model(discriminator.signature_extraction_network, to_file='signature_extraction_discriminator.png', show_shapes=True, show_layer_names=True)
+plot_model(generator.build_duration_policy_network()[0], to_file='duration_policy.png', show_shapes=True, show_layer_names=True)
+plot_model(generator.build_duration_policy_network()[1], to_file='duration_predictor.png', show_shapes=True, show_layer_names=True)
+plot_model(generator.build_packet_size_policy_network()[0], to_file='packet_size_policy.png', show_shapes=True, show_layer_names=True)
+plot_model(generator.build_packet_size_policy_network()[1], to_file='packet_size_predictor.png', show_shapes=True, show_layer_names=True)
+
 # Adverserial Loop
-for i in range(10):
+for i in range(100):
     print("outer loop")
     print("i")
     generator.train()
@@ -76,7 +92,7 @@ for i in range(10):
         generator.generate_sequence()
         sequence_gen = generator.get_sequence_generated()
         fake_sequences.append(sequence_gen)
-    discriminator = Discriminator(fake_sequences, real_features)
+    discriminator = Discriminator(fake_sequences, real_features, segment_length)
     discriminator.train()
     generator.discriminator = discriminator
 

@@ -28,9 +28,11 @@ def is_direction_in(action_value):
 
 
 class Generator(object):
-    def __init__(self, discriminator, epochs=500, alpha=0.001, n_actions=total_actions, lstm_units=100, dense_units=100,
+    def __init__(self, discriminator, segment_length=200, monte_carlo_n=32, epochs=500, alpha=0.0005, n_actions=total_actions, lstm_units=100, dense_units=100,
                  embedding_dim=100,
                  packet_size_policy=None, packet_size_predictor=None, duration_policy=None, duration_predictor=None, psp_fn='pspfn.h5', pspr_fn='pspfrn.h5', dp_fn='dpfn.h5', dpr_fn='dprfn.h5', generated_packets_file='generated_packets.txt', generated_durations_file='generated_durations.txt'):
+        self.monte_carlo_n = monte_carlo_n
+        self.segment_length = segment_length
         # Discriminator provides "advantages" used in loss function
         self.discriminator = discriminator
         # Learning rate for generator
@@ -82,16 +84,9 @@ class Generator(object):
 
         # Negative log likelihood
         def packet_loss(y_true, y_pred):
-            # print("y_pred")
-            y_p = K.print_tensor(K.squeeze(y_pred, axis=0))
-            clipped_y_pred = K.clip(y_p, 1e-8, 1 - 1e-8)
-            # print("y_true")
-            y_t = K.print_tensor(K.squeeze(y_true, axis=0))
-            log_lik = y_t * K.log(clipped_y_pred)
-            ll = K.print_tensor(log_lik)
-            adv = K.print_tensor(K.squeeze(advantages, axis=0))
-            ret = K.print_tensor(K.sum(-ll * adv))
-            return ret
+            clipped_y_pred = K.clip(y_pred, 1e-8, 1 - 1e-8)
+            log_lik = y_true * K.log(clipped_y_pred)
+            return K.sum(-log_lik * advantages)
 
         packet_size_policy = Model(inputs=[packets_input, durations_input, advantages], outputs=[packets_output])
         packet_size_policy.compile(optimizer=Adam(lr=self.lr), loss=packet_loss)
@@ -117,11 +112,14 @@ class Generator(object):
             n_dims = int(int(y_pred.shape[1]) / 2)
             mu = y_pred[:, 0:n_dims]
             logsigma = y_pred[:, n_dims:]
+
             mse = -0.5 * K.sum(K.square((y_true - mu) / K.exp(logsigma)), axis=1)
             sigma_trace = -K.sum(logsigma, axis=1)
             log2pi = -0.5 * n_dims * np.log(2 * np.pi)
+
             log_likelihood = mse + sigma_trace + log2pi
-            return K.mean(-log_likelihood * advantages)
+
+            return K.mean(-log_likelihood*advantages)
 
         duration_policy = Model(inputs=[packets_input, durations_input, advantages], outputs=duration_output)
         duration_policy.compile(optimizer=Adam(lr=self.lr), loss=duration_loss)
@@ -130,12 +128,46 @@ class Generator(object):
 
         return duration_policy, duration_predictor
 
+    def calculate_reward(self, seq):
+        states = [seq] * self.monte_carlo_n
+        for i in range(self.segment_length - len(seq)):
+            actions = self.choose_actions(states)
+            for j in range(len(states)):
+                states[j] = states[j] + [actions[j]]
+        return np.mean(self.discriminator.predict(states))
+
     def calculate_rewards(self):
-        inputs = []
+        rewards = []
         for i in range(len(self.action_memory)):
             input = self.action_memory[0:i+1]
-            inputs.append(input)
-        self.reward_memory = self.discriminator.predict(inputs)
+            rewards.append(self.calculate_reward(input))
+        self.reward_memory = rewards
+
+    def choose_actions(self, states):
+        action_values = []
+        duration_values = []
+        for state in states:
+            action_values.append([0] + [item[0] for item in state])
+            duration_values.append([[0.0]] + [[item[1]] for item in state])
+        packet_size_predictor_output = self.packet_size_predictor.predict([np.array(action_values), np.array(duration_values)])
+        packet_values = []
+        for packet_probs in packet_size_predictor_output:
+            packet_values.append(np.random.choice(self.action_space, p=packet_probs))
+        extended_action_values = []
+        for i in range(len(action_values)):
+            action_value = action_values[i][1:]
+            packet_value = packet_values[i]
+            extended_action_values.append(action_value + [packet_value])
+        duration_predictor_output = self.duration_predictor.predict([np.array(extended_action_values), np.array(duration_values)])
+        duration_values = []
+        for duration_output in duration_predictor_output:
+            mean = duration_output[0]
+            stddev = math.exp(duration_output[1])
+            duration_values.append(math.fabs(np.random.normal(mean, stddev)))
+        all_actions = []
+        for i in range(len(packet_values)):
+            all_actions.append([packet_values[i], duration_values[i]])
+        return all_actions
 
     def choose_action(self, state):
         base_action_values = [item[0] for item in state]
@@ -147,9 +179,12 @@ class Generator(object):
         extended_action_values = np.array([base_action_values + [packet_value]])
         duration_predictor_output = self.duration_predictor.predict([extended_action_values, duration_values])
         mean = duration_predictor_output[0][0]
-        variance = math.exp(duration_predictor_output[0][1])
-        duration = np.random.normal(mean, variance)
-        duration = 0 if duration < 0 else duration
+        stddev = math.exp(duration_predictor_output[0][1])
+        duration = math.fabs(np.random.normal(mean, stddev))
+        print("packet value")
+        print(packet_value)
+        print("duration value")
+        print(duration)
         return [packet_value, duration]
 
     def learn(self):
@@ -158,35 +193,26 @@ class Generator(object):
         packet_size_1 = []
         packet_size_2 = []
         durations_1 = []
-        advantages_1 = []
-        advantages_2 = []
         for i in range(len(self.action_memory)):
             packets = [0] + raw_packets[0:i]
-            durations = [0] + raw_durations[0:i]
+            durations = [0.0] + raw_durations[0:i]
             packet_size_1.append(packets)
             durations_1.append([[item] for item in durations])
-            advantage = self.reward_memory[i]
-            advantages_1.append(advantage)
         for i in range(len(self.action_memory)):
             packets = raw_packets[0:i+1]
             packet_size_2.append(packets)
-            if i < len(self.action_memory) - 1:
-                advantage = self.reward_memory[i+1]
-                advantages_2.append(advantage)
-            if i == len(self.action_memory) - 1:
-                advantage = self.reward_memory[i]
-                advantages_2.append(advantage)
         packet_outputs = np.zeros([len(raw_packets), self.n_actions])
         packet_outputs[np.arange(len(raw_packets)), raw_packets] = 1
         duration_outputs = np.array(raw_durations)
-        advantages_input_1 = np.array(advantages_1) - 0.5
-        advantages_input_2 = np.array(advantages_2) - 0.5
+        mean = np.mean(self.reward_memory)
+        std = np.std(self.reward_memory) if np.std(self.reward_memory) > 0 else 1
+        advantages = (np.array(self.reward_memory) - mean) / std
         packets_size_input_1 = np.array(packet_size_1)
         packets_size_input_2 = np.array(packet_size_2)
         durations_input_1 = np.array(durations_1)
         for i in range(len(packets_size_input_1)):
-            cost_1 = self.packet_size_policy.train_on_batch([np.array([packets_size_input_1[i]]), np.array([durations_input_1[i]]), np.array([advantages_input_1[i]])], np.array([packet_outputs[i]]))
-            cost_2 = self.duration_policy.train_on_batch([np.array([packets_size_input_2[i]]), np.array([durations_input_1[i]]), np.array([advantages_input_2[i]])], np.array([duration_outputs[i]]))
+            cost_1 = self.packet_size_policy.train_on_batch([np.array([packets_size_input_1[i]]), np.array([durations_input_1[i]]), np.array([advantages[i]])], np.array([packet_outputs[i]]))
+            cost_2 = self.duration_policy.train_on_batch([np.array([packets_size_input_2[i]]), np.array([durations_input_1[i]]), np.array([advantages[i]])], np.array([duration_outputs[i]]))
         self.action_memory = []
         self.reward_memory = []
         return cost_1, cost_2
@@ -198,7 +224,7 @@ class Generator(object):
     def generate_sequence(self):
         self.action_memory = []
         self.reward_memory = []
-        while len(self.action_memory) == 0 or (not self.action_memory[len(self.action_memory) - 1][1] == 0 and not len(self.action_memory) > 1300):
+        while len(self.action_memory) < self.segment_length:
             self.generate_step()
         self.calculate_rewards()
 
@@ -210,6 +236,7 @@ class Generator(object):
             self.generate_sequence()
             self.append_generated()
             self.learn()
+            self.save_models()
 
     def append_generated(self):
         raw_packets = [item[0] for item in self.action_memory]
@@ -224,7 +251,7 @@ class Generator(object):
         self.duration_predictor.save(self.dpr_fn)
 
     def load_models(self):
-        self.packet_size_policy = load_model(self.psp_fn)
-        self.packet_size_predictor = load_model(self.pspr_fn)
-        self.duration_policy = load_model(self.dp_fn)
-        self.duration_policy = load_model(self.dpr_fn)
+        self.packet_size_policy = load_model(self.psp_fn, custom_objects={'SeqSelfAttention': SeqSelfAttention})
+        self.packet_size_predictor = load_model(self.pspr_fn, custom_objects={'SeqSelfAttention': SeqSelfAttention})
+        self.duration_policy = load_model(self.dp_fn, custom_objects={'SeqSelfAttention': SeqSelfAttention})
+        self.duration_policy = load_model(self.dpr_fn, custom_objects={'SeqSelfAttention': SeqSelfAttention})
