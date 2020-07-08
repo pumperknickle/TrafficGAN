@@ -28,7 +28,7 @@ def is_direction_in(action_value):
 
 
 class Generator(object):
-    def __init__(self, discriminator, segment_length=200, monte_carlo_n=32, epochs=500, alpha=0.0005, n_actions=total_actions, lstm_units=100, dense_units=100,
+    def __init__(self, discriminator, segment_length=200, monte_carlo_n=32, epochs=1, alpha=0.0005, n_actions=total_actions, lstm_units=100, dense_units=100,
                  embedding_dim=100,
                  packet_size_policy=None, packet_size_predictor=None, duration_policy=None, duration_predictor=None, psp_fn='pspfn.h5', pspr_fn='pspfrn.h5', dp_fn='dpfn.h5', dpr_fn='dprfn.h5', generated_packets_file='generated_packets.txt', generated_durations_file='generated_durations.txt'):
         self.monte_carlo_n = monte_carlo_n
@@ -97,10 +97,9 @@ class Generator(object):
 
     def build_duration_policy_network(self):
         advantages = Input(shape=[1])
-        packets_input = Input(shape=(None,))
-        packet_embedding = Embedding(input_dim=self.n_actions, output_dim=self.embedding_dim)(packets_input)
+        packets_input = Input(shape=(None, 1))
         durations_input = Input(shape=(None, 1))
-        merged = concatenate([packet_embedding, durations_input])
+        merged = concatenate([packets_input, durations_input])
         lstm1 = LSTM(self.lstm_units, return_sequences=True)(merged)
         attention = SeqSelfAttention(attention_activation='sigmoid')(lstm1)
         lstm2 = LSTM(self.lstm_units)(attention)
@@ -157,7 +156,9 @@ class Generator(object):
         for i in range(len(action_values)):
             action_value = action_values[i][1:]
             packet_value = packet_values[i]
-            extended_action_values.append(action_value + [packet_value])
+            full_av = action_value + [packet_value]
+            normalized_av = [[float(abs(item - max_packet_size - 1))/float(max_packet_size)] for item in full_av]
+            extended_action_values.append(normalized_av)
         duration_predictor_output = self.duration_predictor.predict([np.array(extended_action_values), np.array(duration_values)])
         duration_values = []
         for duration_output in duration_predictor_output:
@@ -176,7 +177,9 @@ class Generator(object):
         packet_size_predictor_output = self.packet_size_predictor.predict([action_values, duration_values])
         packet_probabilities = packet_size_predictor_output[0]
         packet_value = np.random.choice(self.action_space, p=packet_probabilities)
-        extended_action_values = np.array([base_action_values + [packet_value]])
+        full_av = base_action_values + [packet_value]
+        normalized_av = [[float(abs(item - max_packet_size - 1)) / float(max_packet_size)] for item in full_av]
+        extended_action_values = np.array([normalized_av])
         duration_predictor_output = self.duration_predictor.predict([extended_action_values, duration_values])
         mean = duration_predictor_output[0][0]
         stddev = math.exp(duration_predictor_output[0][1])
@@ -200,7 +203,7 @@ class Generator(object):
             durations_1.append([[item] for item in durations])
         for i in range(len(self.action_memory)):
             packets = raw_packets[0:i+1]
-            packet_size_2.append(packets)
+            packet_size_2.append([[float(abs(item - max_packet_size - 1))/float(max_packet_size)] for item in packets])
         packet_outputs = np.zeros([len(raw_packets), self.n_actions])
         packet_outputs[np.arange(len(raw_packets)), raw_packets] = 1
         duration_outputs = np.array(raw_durations)
