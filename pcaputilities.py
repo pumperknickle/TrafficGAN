@@ -171,7 +171,7 @@ def extractFeatures(ngrams, signatures):
 
 def signatureCount(all_signatures):
     all_sigs = 0
-    for count, signatures in all_signatures:
+    for count, signatures in all_signatures.items():
         all_sigs += len(signatures)
     return all_sigs
 

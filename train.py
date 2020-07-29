@@ -152,7 +152,7 @@ tf.config.experimental_run_functions_eagerly(True)
 
 # hyper parameters
 B = 32   # batch size
-T = 50   # Max length of sentence
+T = 20   # Max length of sentence
 g_E = 64   # Generator embedding size
 g_H = 64   # Generator LSTM hidden size
 g_lr = 1e-5
@@ -161,8 +161,8 @@ d_H = 64
 d_dropout = 0.0   # Discriminator dropout ratio
 d_lr = 1e-6
 
-n_sample = 1   # Number of Monte Calro Search
-generate_samples = 700   # Number of generated sentences
+n_sample = 8   # Number of Monte Calro Search
+generate_samples = 2000   # Number of generated sentences
 
 # Pretraining parameters
 g_pre_lr = 1e-2
@@ -184,7 +184,7 @@ trainer.pre_train(g_epochs=g_pre_epochs, d_epochs=d_pre_epochs, g_pre_path=g_pre
 trainer.load_pre_train(g_pre_weights_path, d_pre_weights_path)
 trainer.reflect_pre_train()
 
-# trainer.train(steps=1, g_steps=1, head=10)
+# trainer.train(steps=1, g_steps=1)
 trainer.train(steps=100, g_steps=1, use_sig=True)
 
 
