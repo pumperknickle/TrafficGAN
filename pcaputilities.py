@@ -169,6 +169,13 @@ def extractFeatures(ngrams, signatures):
     return features
 
 
+def signatureCount(all_signatures):
+    all_sigs = 0
+    for count, signatures in all_signatures:
+        all_sigs += len(signatures)
+    return all_sigs
+
+
 def signatureExtractionAll(sequences, minSigSize, maxSigSize, distance_threshold, cluster_threshold):
     all_signatures = dict()
     for i in range(minSigSize, maxSigSize + 1):

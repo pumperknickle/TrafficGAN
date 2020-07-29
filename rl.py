@@ -1,5 +1,6 @@
 from models import Generator
 import numpy as np
+from pcaputilities import featureExtractionAll
 
 
 class Agent(object):
@@ -83,7 +84,7 @@ class Environment(object):
     """
     Environment is responsible for managing generators and computing the state action values or rewards
     """
-    def __init__(self, discriminator, B, T, g_beta, BOS=1, n_sample=16):
+    def __init__(self, discriminator, signatureDiscriminator, all_signatures, B, T, g_beta, n_sample=16, BOS=1):
         """
         Environment class for Reinforced Learning
         # Arguments:
@@ -101,11 +102,12 @@ class Environment(object):
         self.n_sample = n_sample
         self.BOS = BOS
         self.discriminator = discriminator
+        self.signatureDiscriminator = signatureDiscriminator
+        self.all_signatures = all_signatures
         self.g_beta = g_beta
         self.t = 1
         self._state = np.zeros([self.B, 1], dtype=np.int32)
         self.reset()
-
 
     def get_state(self):
         return self._state
@@ -127,7 +129,7 @@ class Environment(object):
         else:
             return np.concatenate([state, word], axis=-1)
 
-    def step(self, action):
+    def step(self, action, use_sig=False):
         """
         Step t -> t + 1 and returns a result of the Agent action.
         # Arguments:
@@ -141,7 +143,7 @@ class Environment(object):
         """
         self.t = self.t + 1
 
-        reward = self.Q(action, self.n_sample)
+        reward = self.Q(action, self.n_sample, use_sig)
         is_episode_end = self.t >= self.T
 
         self._append_state(action)
@@ -150,7 +152,7 @@ class Environment(object):
 
         return [next_state, reward, is_episode_end, info]
 
-    def Q(self, action, n_sample=16):
+    def Q(self, action, n_sample=16, use_sig=False):
         """
         State-Action value function using Rollout policy
         # Arguments:
@@ -180,7 +182,10 @@ class Environment(object):
             for _ in range(self.t, self.T):
                 y_tau = self.g_beta.act(Y, epsilon=self.g_beta.eps)
                 Y = self._append_state(y_tau, state=Y)
-            reward += self.discriminator.predict(Y) / n_sample
+            if use_sig:
+                reward += self.discriminator.predict(np.array(featureExtractionAll(Y.tolist(), self.all_signatures))) / n_sample
+            else:
+                reward += self.discriminator.predict(Y) / n_sample
         self.g_beta.generator.set_rnn_state(next_h, next_c)
         return reward
 

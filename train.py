@@ -1,11 +1,12 @@
 from utils import extract_all, build_generator_pretraining_datasets, build_discriminator_datasets, split_sequences
 from rl import Agent, Environment
-from models import Discriminator, GeneratorPretraining
+from models import Discriminator, GeneratorPretraining, SignatureDiscriminator
 from keras.optimizers import Adam
 import os
 import numpy as np
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
+from pcaputilities import featureExtractionAll, signatureExtractionAll, signatureCount
 
 
 class Trainer(object):
@@ -22,12 +23,14 @@ class Trainer(object):
         self.init_eps = init_eps
         self.real_packets = real_packets_file
         self.pos_sequences, self.V = extract_all(real_packets_file)
+        self.all_signatures = signatureExtractionAll(self.pos_sequences, 2, 6, 5, 4)
         self.pos_sequences = split_sequences(self.pos_sequences, T-2)
         self.neg_sequences = []
         self.agent = Agent(B, self.V, g_E, g_H, g_lr)
         self.g_beta = Agent(B, self.V, g_E, g_H, g_lr)
         self.discriminator = Discriminator(self.V, d_E, d_H, d_dropout)
-        self.env = Environment(self.discriminator, self.B, self.V, self.g_beta, n_sample=n_sample)
+        self.signature_discriminator = SignatureDiscriminator(signatureCount(self.all_signatures), H=200)
+        self.env = Environment(self.discriminator, self.signature_discriminator, self.all_signatures, self.B, self.V, self.g_beta, n_sample)
         self.generator_pre = GeneratorPretraining(self.V, g_E, g_H)
         self.g_pre_path, self.d_pre_path = None, None
 
@@ -101,7 +104,7 @@ class Trainer(object):
         self.discriminator.load_weights(d_path)
 
     def train(self, steps=10, g_steps=1, d_steps=1, d_epochs=3, g_weights_path='data/save/generator.pkl',
-              d_weights_path='data/save/discriminator.hdf5', verbose=True, head=1):
+              d_weights_path='data/save/discriminator.hdf5', use_sig=False):
         d_adam = Adam(self.d_lr)
         self.discriminator.compile(d_adam, 'binary_crossentropy', metrics=['accuracy'])
         self.eps = self.init_eps
@@ -114,17 +117,28 @@ class Trainer(object):
                 for t in range(self.T):
                     state = self.env.get_state()
                     action = self.agent.act(state, epsilon=0.0, stateful=False)
-                    next_state, reward, is_episode_end, info = self.env.step(action)
+                    next_state, reward, is_episode_end, info = self.env.step(action, use_sig)
                     self.agent.generator.update(state, action, reward)
                     rewards[:, t] = reward.reshape([self.B, ])
             print("Adverserial Training - Discriminator")
             for _ in range(d_steps):
-                neg_sequences = self.agent.generator.generate_samples(self.T, self.generate_samples)
-                print("generated sequences")
-                print(neg_sequences)
-                X, Y, _ = build_discriminator_datasets(self.pos_sequences, neg_sequences)
-                X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.33, random_state=25)
-                self.discriminator.fit(x=X_train, y=y_train, batch_size=self.B, epochs=d_epochs, validation_data=(X_test, y_test))
+                if use_sig:
+                    neg_sequences = self.agent.generator.generate_samples(self.T, self.generate_samples)
+                    print("generated sequences")
+                    print(neg_sequences)
+                    X_pos = featureExtractionAll(self.pos_sequences, self.all_signatures)
+                    X_neg = featureExtractionAll(neg_sequences, self.all_signatures)
+                    X = np.array(X_pos + X_neg)
+                    y = np.array([1] * len(self.pos_sequences) + [0] * len(neg_sequences))
+                    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33, random_state=25)
+                    self.signature_discriminator.fit(x=X_train, y=y_train, batch_size=self.B, epochs=d_epochs, validation_data=(X_test, y_test))
+                else:
+                    neg_sequences = self.agent.generator.generate_samples(self.T, self.generate_samples)
+                    print("generated sequences")
+                    print(neg_sequences)
+                    X, Y, _ = build_discriminator_datasets(self.pos_sequences, neg_sequences)
+                    X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.33, random_state=25)
+                    self.discriminator.fit(x=X_train, y=y_train, batch_size=self.B, epochs=d_epochs, validation_data=(X_test, y_test))
 
             # Update env.g_beta to agent
             self.agent.save(g_weights_path)
@@ -147,7 +161,7 @@ d_H = 64
 d_dropout = 0.0   # Discriminator dropout ratio
 d_lr = 1e-6
 
-n_sample = 16   # Number of Monte Calro Search
+n_sample = 1   # Number of Monte Calro Search
 generate_samples = 700   # Number of generated sentences
 
 # Pretraining parameters
@@ -170,6 +184,7 @@ trainer.pre_train(g_epochs=g_pre_epochs, d_epochs=d_pre_epochs, g_pre_path=g_pre
 trainer.load_pre_train(g_pre_weights_path, d_pre_weights_path)
 trainer.reflect_pre_train()
 
-trainer.train(steps=100, g_steps=1, head=10)
+# trainer.train(steps=1, g_steps=1, head=10)
+trainer.train(steps=100, g_steps=1, use_sig=True)
 
 
