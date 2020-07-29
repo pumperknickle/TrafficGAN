@@ -48,12 +48,15 @@ segment_length=200
 gen_features = []
 real_features = []
 
+real_normalized_packets = []
+
 for real_packet in real_packets:
     segment_length = min(len(real_packet), segment_length)
 
 for i in range(len(real_packets)):
     durations = [float(x) for x in real_durations[i]]
     packet_sizes = [(int(x) + max_packet_size + 1) for x in real_packets[i]]
+    real_normalized_packets.append(packet_sizes)
     mean_d = np.mean(durations)
     std_d = np.std(durations)
     gen_sample = []
@@ -69,10 +72,10 @@ for i in range(len(real_packets)):
 
 # Pretraining
 discriminator = Discriminator(gen_features, real_features, segment_length)
-# discriminator.load_models()
 discriminator.train()
 
 generator = Generator(discriminator, segment_length)
+generator.pretrain(real_normalized_packets)
 generator.train()
 
 plot_model(discriminator.lstm_discriminator_network, to_file='lstm_discriminator.png', show_shapes=True, show_layer_names=True)

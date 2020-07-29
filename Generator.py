@@ -74,9 +74,7 @@ class Generator(object):
         advantages = Input(shape=[1])
         packets_input = Input(shape=(None,))
         packet_embedding = Embedding(input_dim=self.n_actions, output_dim=self.embedding_dim)(packets_input)
-        durations_input = Input(shape=(None, 1))
-        merged = concatenate([packet_embedding, durations_input])
-        lstm1 = LSTM(self.lstm_units, return_sequences=True)(merged)
+        lstm1 = LSTM(self.lstm_units, return_sequences=True)(packet_embedding)
         attention = SeqSelfAttention(attention_activation='sigmoid')(lstm1)
         lstm2 = LSTM(self.lstm_units)(attention)
         hidden_dense = Dense(self.dense_units, activation='relu')(lstm2)
@@ -88,10 +86,10 @@ class Generator(object):
             log_lik = y_true * K.log(clipped_y_pred)
             return K.sum(-log_lik * advantages)
 
-        packet_size_policy = Model(inputs=[packets_input, durations_input, advantages], outputs=[packets_output])
+        packet_size_policy = Model(inputs=[packets_input, advantages], outputs=[packets_output])
         packet_size_policy.compile(optimizer=Adam(lr=self.lr), loss=packet_loss)
 
-        packet_size_predictor = Model(inputs=[packets_input, durations_input], outputs=[packets_output])
+        packet_size_predictor = Model(inputs=[packets_input], outputs=[packets_output])
 
         return packet_size_policy, packet_size_predictor
 
@@ -148,7 +146,7 @@ class Generator(object):
         for state in states:
             action_values.append([0] + [item[0] for item in state])
             duration_values.append([[0.0]] + [[item[1]] for item in state])
-        packet_size_predictor_output = self.packet_size_predictor.predict([np.array(action_values), np.array(duration_values)])
+        packet_size_predictor_output = self.packet_size_predictor.predict([np.array(action_values)])
         packet_values = []
         for packet_probs in packet_size_predictor_output:
             packet_values.append(np.random.choice(self.action_space, p=packet_probs))
@@ -174,7 +172,7 @@ class Generator(object):
         base_action_values = [item[0] for item in state]
         action_values = np.array([[0] + base_action_values])
         duration_values = np.array([[[0.0]] + [[item[1]] for item in state]])
-        packet_size_predictor_output = self.packet_size_predictor.predict([action_values, duration_values])
+        packet_size_predictor_output = self.packet_size_predictor.predict([action_values])
         packet_probabilities = packet_size_predictor_output[0]
         packet_value = np.random.choice(self.action_space, p=packet_probabilities)
         full_av = base_action_values + [packet_value]
@@ -214,11 +212,26 @@ class Generator(object):
         packets_size_input_2 = np.array(packet_size_2)
         durations_input_1 = np.array(durations_1)
         for i in range(len(packets_size_input_1)):
-            cost_1 = self.packet_size_policy.train_on_batch([np.array([packets_size_input_1[i]]), np.array([durations_input_1[i]]), np.array([advantages[i]])], np.array([packet_outputs[i]]))
+            cost_1 = self.packet_size_policy.train_on_batch([np.array([packets_size_input_1[i]]), np.array([advantages[i]])], np.array([packet_outputs[i]]))
             cost_2 = self.duration_policy.train_on_batch([np.array([packets_size_input_2[i]]), np.array([durations_input_1[i]]), np.array([advantages[i]])], np.array([duration_outputs[i]]))
         self.action_memory = []
         self.reward_memory = []
         return cost_1, cost_2
+
+    def pretrain(self, all_real_packets):
+        X = dict()
+        Y = dict()
+        for real_packets in all_real_packets:
+            for i in range(1, len(real_packets) - 1):
+                X_packets = real_packets[0:i]
+                Y_packet = real_packets[i:i+1]
+                Y_packet_onehot = np.zeros(self.n_actions)
+                Y_packet_onehot[Y_packet[0]] = 1
+                X[i] = X.get(i, []) + [X_packets]
+                Y[i] = Y.get(i, []) + [Y_packet_onehot]
+        for i in X.keys():
+            self.packet_size_predictor.compile(optimizer=Adam(lr=self.lr), loss='categorical_crossentropy')
+            self.packet_size_predictor.train_on_batch([np.array(X[i])], np.array(Y[i]))
 
     def generate_step(self):
         action = self.choose_action(self.action_memory)
